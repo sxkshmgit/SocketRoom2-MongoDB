@@ -1,45 +1,16 @@
 import pytest
-from sqlalchemy import create_engine, event, func, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from pymongo.errors import DuplicateKeyError
 
 from backend.app import crud
-from backend.app.database import Base
-from backend.app.models import Conversation, PrivateMessage
 
 
 @pytest.fixture
-def db():
-    test_engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    @event.listens_for(test_engine, "connect")
-    def enable_sqlite_foreign_keys(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    Base.metadata.create_all(bind=test_engine)
-    TestingSessionLocal = sessionmaker(
-        bind=test_engine,
-        autocommit=False,
-        autoflush=False,
-    )
-    session = TestingSessionLocal()
-    try:
-        yield session
-    finally:
-        session.close()
-        test_engine.dispose()
+def db(test_db):
+    return test_db
 
 
 @pytest.fixture
 def users(db):
-    # The password hash is irrelevant here, so skip the slow Argon2 call.
     return [
         crud.create_user(db, name, "not-a-real-hash")
         for name in ("alice", "bob", "carol")
@@ -47,7 +18,7 @@ def users(db):
 
 
 def count_conversations(db):
-    return db.scalar(select(func.count()).select_from(Conversation))
+    return db.conversations.count_documents({})
 
 
 def test_same_conversation_regardless_of_who_starts_it(db, users):
@@ -71,10 +42,10 @@ def test_conversation_with_yourself_is_rejected(db, users):
     assert count_conversations(db) == 0
 
 
-def test_conversation_with_unknown_user_raises_integrity_error(db, users):
+def test_conversation_with_unknown_user_is_rejected(db, users):
     alice = users[0]
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(ValueError):
         crud.get_or_create_conversation(db, alice.id, 9999)
 
     assert count_conversations(db) == 0
@@ -84,9 +55,6 @@ def test_concurrent_create_returns_existing_conversation(db, users, monkeypatch)
     alice, bob, _ = users
     existing = crud.get_or_create_conversation(db, alice.id, bob.id)
 
-    # Simulate another request creating the pair between our lookup and insert:
-    # the first lookup misses, the insert hits the unique constraint, and the
-    # function must recover by re-querying.
     real_lookup = crud.get_conversation_between_users
     calls = []
 
@@ -107,19 +75,14 @@ def test_concurrent_create_returns_existing_conversation(db, users, monkeypatch)
     assert count_conversations(db) == 1
 
 
-def test_database_rejects_duplicate_or_unordered_pairs(db, users):
+def test_database_rejects_duplicate_pairs(db, users):
     alice, bob, _ = users
-    crud.get_or_create_conversation(db, alice.id, bob.id)
+    existing = crud.get_or_create_conversation(db, alice.id, bob.id)
 
-    db.add(Conversation(user_low_id=alice.id, user_high_id=bob.id))
-    with pytest.raises(IntegrityError):
-        db.commit()
-    db.rollback()
-
-    db.add(Conversation(user_low_id=bob.id, user_high_id=alice.id))
-    with pytest.raises(IntegrityError):
-        db.commit()
-    db.rollback()
+    with pytest.raises(DuplicateKeyError):
+        db.conversations.insert_one(
+            {"id": existing.id + 1, "user_low_id": alice.id, "user_high_id": bob.id}
+        )
 
     assert count_conversations(db) == 1
 
@@ -160,14 +123,17 @@ def test_private_message_history_is_isolated_per_conversation(db, users):
     assert [m.content for m in crud.get_recent_private_messages(db, alice_carol.id)] == ["to carol"]
 
 
-def test_private_message_requires_existing_conversation(db, users):
-    alice = users[0]
+def test_message_from_unknown_sender_is_rejected(db, users):
+    alice, bob, _ = users
+    conversation = crud.get_or_create_conversation(db, alice.id, bob.id)
 
-    with pytest.raises(IntegrityError):
-        crud.create_private_message(db, 9999, alice.id, "orphan")
-    db.rollback()
+    with pytest.raises(ValueError):
+        crud.create_private_message(db, conversation.id, 9999, "orphan")
+    with pytest.raises(ValueError):
+        crud.create_message(db, 9999, "orphan")
 
-    assert db.scalar(select(func.count()).select_from(PrivateMessage)) == 0
+    assert db.private_messages.count_documents({}) == 0
+    assert db.messages.count_documents({}) == 0
 
 
 def test_list_conversations_newest_activity_first_and_skips_empty(db, users):
@@ -187,7 +153,6 @@ def test_list_conversations_newest_activity_first_and_skips_empty(db, users):
     ]
     assert alice_list[0][1] == latest.created_at
 
-    # Activity in an older conversation moves it back to the top.
     crud.create_private_message(db, alice_bob.id, bob.id, "reply")
     assert [c.id for c, _ in crud.list_conversations_for_user(db, alice.id)] == [
         alice_bob.id,

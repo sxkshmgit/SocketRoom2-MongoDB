@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy.exc import SQLAlchemyError
+from pymongo.errors import PyMongoError
 
 from backend.app import crud
 from backend.app.connection_manager import manager
@@ -41,8 +41,6 @@ def conversation_id(client, users):
     return response.json()["id"]
 
 
-# ---------- delivery ----------
-
 def test_private_message_reaches_both_participants_only(client, users, conversation_id):
     alice_id, alice_token = users["alice"]
     _, bob_token = users["bob"]
@@ -55,8 +53,6 @@ def test_private_message_reaches_both_participants_only(client, users, conversat
         alice_frame = alice.receive_json()
         bob_frame = bob.receive_json()
 
-        # A General message sent afterwards must be carol's *first* frame,
-        # which proves she never received the private one.
         alice.send_json({"type": "message", "content": "hello everyone"})
         carol_frame = carol.receive_json()
         alice.receive_json()
@@ -115,8 +111,6 @@ def test_private_message_is_not_in_general_history(client, users, conversation_i
     assert response.json() == []
 
 
-# ---------- authorization and validation ----------
-
 def test_non_participant_cannot_send(client, users, conversation_id):
     _, alice_token = users["alice"]
     _, carol_token = users["carol"]
@@ -164,7 +158,7 @@ def test_save_failure_returns_error(client, users, conversation_id, monkeypatch)
     _, alice_token = users["alice"]
 
     def failing_create(*args, **kwargs):
-        raise SQLAlchemyError("database unavailable")
+        raise PyMongoError("database unavailable")
 
     monkeypatch.setattr(crud, "create_private_message", failing_create)
 
@@ -172,8 +166,6 @@ def test_save_failure_returns_error(client, users, conversation_id, monkeypatch)
         send_private(alice, conversation_id, "lost")
         assert_error(alice, "Message could not be saved")
 
-
-# ---------- connection manager ----------
 
 def test_manager_tracks_user_for_each_socket(client, users):
     alice_id, alice_token = users["alice"]

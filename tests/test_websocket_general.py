@@ -1,10 +1,11 @@
 from datetime import timedelta
 
+import mongomock
 import pytest
-from sqlalchemy.exc import IntegrityError
 
-from backend.app import crud, security
 from backend.app import main as main_module
+from backend.app import security
+from backend.app.database import get_db
 from tests.helpers import (
     assert_closed_1008,
     assert_error,
@@ -26,18 +27,10 @@ def get_history(client, token):
     return response.json()
 
 
-# ---------- test environment safety ----------
+def test_tests_use_the_fake_database(client, test_db):
+    assert get_db() is test_db
+    assert isinstance(test_db, mongomock.Database)
 
-def test_ws_helpers_use_sqlite_and_enforce_foreign_keys(client):
-    with main_module.SessionLocal() as db:
-        assert db.get_bind().dialect.name == "sqlite"
-        room = crud.get_default_room(db)
-        assert room is not None
-        with pytest.raises(IntegrityError):
-            crud.create_message(db, room.id, 9999, "orphan")
-
-
-# ---------- authentication ----------
 
 def test_auth_ok_returns_identity(client):
     token = get_token(client, "alice")
@@ -78,8 +71,6 @@ def test_auth_timeout_closes_with_1008(client, monkeypatch):
     with client.websocket_connect("/ws") as ws:
         assert_closed_1008(ws)
 
-
-# ---------- messaging and persistence ----------
 
 def test_message_is_broadcast_to_all_connected_clients(client):
     alice_token = get_token(client, "alice")
@@ -127,8 +118,6 @@ def test_invalid_frames_return_errors_and_connection_stays_open(client):
 
     assert [m["content"] for m in get_history(client, token)] == ["still works"]
 
-
-# ---------- disconnect ----------
 
 def test_disconnect_removes_connection_and_others_keep_working(client):
     alice_token = get_token(client, "alice")

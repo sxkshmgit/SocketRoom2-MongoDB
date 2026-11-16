@@ -30,14 +30,6 @@ class Base(DeclarativeBase):
     pass
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
 MONGO_DB = os.getenv("MONGO_DB", "socketroom")
 
@@ -45,8 +37,12 @@ client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=3000)
 db = client[MONGO_DB]
 
 
+def get_db() -> Database:
+    return db
+
+
 def init_db() -> None:
-    database = db
+    database = get_db()
     database.command("ping")
 
     for name in ("users", "messages", "conversations", "private_messages"):

@@ -32,7 +32,6 @@ def test_connection_works_until_token_expires_then_closes_with_1008(client):
 
         started = time.monotonic()
         assert_closed_1008(ws)
-        # JWT expiry has one-second resolution, so allow for rounding.
         assert time.monotonic() - started < 3.5
 
     wait_for_connections(0)

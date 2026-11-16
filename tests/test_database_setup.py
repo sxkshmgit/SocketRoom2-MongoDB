@@ -1,4 +1,7 @@
-from backend.app import database
+import pytest
+from pymongo.errors import DuplicateKeyError
+
+from backend.app import crud, database
 
 
 def unique_index_keys(collection):
@@ -25,3 +28,12 @@ def test_init_db_can_run_again(test_db):
 def test_next_id_counts_up_per_collection(test_db):
     assert [database.next_id(test_db, "users") for _ in range(3)] == [1, 2, 3]
     assert database.next_id(test_db, "messages") == 1
+
+
+def test_duplicate_username_is_rejected(test_db):
+    assert crud.create_user(test_db, "alice", "hash") is not None
+    assert crud.create_user(test_db, "Alice", "hash") is None
+
+    with pytest.raises(DuplicateKeyError):
+        test_db.users.insert_one({"id": 99, "username": "alice"})
+    assert test_db.users.count_documents({}) == 1

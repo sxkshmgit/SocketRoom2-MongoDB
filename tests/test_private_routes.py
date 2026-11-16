@@ -1,12 +1,11 @@
 import pytest
 
 from backend.app import crud
-from backend.app import main as main_module
+from backend.app.database import get_db
 from tests.helpers import auth_headers, register_and_login
 
 
 def user_with_headers(client, username):
-    """Return (user_id, auth headers) for a new user."""
     user_id, token = register_and_login(client, username)
     return user_id, auth_headers(token)
 
@@ -31,13 +30,8 @@ def start_conversation(client, headers, other_user_id):
 
 
 def add_private_message(conversation_id, sender_id, content):
-    # These tests are about the HTTP routes, so write messages directly
-    # through CRUD. The client fixture points SessionLocal at the test database.
-    with main_module.SessionLocal() as db:
-        return crud.create_private_message(db, conversation_id, sender_id, content).id
+    return crud.create_private_message(get_db(), conversation_id, sender_id, content).id
 
-
-# ---------- authentication ----------
 
 @pytest.mark.parametrize(
     "method, path",
@@ -54,8 +48,6 @@ def test_conversation_routes_require_authentication(client, method, path):
 
     assert response.status_code == 401
 
-
-# ---------- POST /conversations ----------
 
 def test_start_conversation_returns_other_user(client, alice, bob):
     alice_id, alice_headers = alice
@@ -120,8 +112,6 @@ def test_start_conversation_rejects_invalid_body(client, alice):
     assert response.status_code == 422
 
 
-# ---------- GET /conversations ----------
-
 def test_list_conversations_shows_only_own_with_messages_newest_first(
     client, alice, bob, carol
 ):
@@ -155,8 +145,6 @@ def test_list_conversations_is_empty_without_messages(client, alice, bob):
     assert response.status_code == 200
     assert response.json() == []
 
-
-# ---------- GET /conversations/{id}/messages ----------
 
 def test_participants_can_read_history_oldest_first(client, alice, bob):
     alice_id, alice_headers = alice
@@ -234,8 +222,6 @@ def test_unknown_conversation_gets_404(client, alice):
 
     assert response.status_code == 404
 
-
-# ---------- General chat is unaffected ----------
 
 def test_private_messages_do_not_appear_in_general_history(client, alice, bob):
     alice_id, alice_headers = alice
