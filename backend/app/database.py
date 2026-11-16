@@ -2,33 +2,6 @@ import os
 
 from pymongo import ASCENDING, MongoClient, ReturnDocument
 from pymongo.database import Database
-from sqlalchemy import create_engine
-from sqlalchemy.engine import URL
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
-
-SQL_SERVER = r".\SQLEXPRESS"
-DATABASE_NAME = "SocketRoomDB"
-ODBC_DRIVER = "ODBC Driver 17 for SQL Server"
-
-DATABASE_URL = URL.create(
-    drivername="mssql+pyodbc",
-    host=SQL_SERVER,
-    database=DATABASE_NAME,
-    query={"driver": ODBC_DRIVER},
-)
-
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-
-SessionLocal = sessionmaker(
-    bind=engine,
-    autocommit=False,
-    autoflush=False,
-)
-
-
-class Base(DeclarativeBase):
-    pass
-
 
 MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
 MONGO_DB = os.getenv("MONGO_DB", "socketroom")
