@@ -1,10 +1,3 @@
-// SocketRoom frontend.
-//
-// HTTP (fetch) is used for logging in and loading data: history, users,
-// conversations. One WebSocket per tab carries live messages both ways.
-
-// ---------- Page elements ----------
-
 const authView = document.getElementById("auth-view");
 const chatView = document.getElementById("chat-view");
 const loginForm = document.getElementById("login-form");
@@ -29,33 +22,25 @@ const messageForm = document.getElementById("message-form");
 const messageInput = document.getElementById("message-input");
 const sendButton = document.getElementById("send-button");
 
-// ---------- State ----------
-
 const TOKEN_KEY = "socketroom_token";
 const RECONNECT_DELAY_MS = 2000;
 const SESSION_EXPIRED = "Your session has expired. Please log in again.";
 
-// The open chat is either General or one private conversation.
-// Its `id` is "general" or the conversation's ID.
 const GENERAL = { id: "general", name: "General" };
 
 let token = sessionStorage.getItem(TOKEN_KEY);
-let currentUser = null;   // { id, username }
-let socket = null;        // the open WebSocket, or null
+let currentUser = null;
+let socket = null;
 let reconnectTimer = null;
 let activeChat = GENERAL;
-let users = [];           // everyone registered
-let conversations = [];   // my conversations, newest activity first
-const unread = new Set(); // IDs of chats with unseen messages
+let users = [];
+let conversations = [];
+const unread = new Set();
 
 function privateChat(conversation) {
     return { id: conversation.id, name: conversation.other_username, conversation };
 }
 
-// ---------- HTTP ----------
-
-// Calls the API and returns { ok, status, data }. status is 0 if the server
-// could not be reached.
 async function api(path, { method = "GET", body } = {}) {
     const headers = {};
     if (token) {
@@ -77,8 +62,6 @@ async function api(path, { method = "GET", body } = {}) {
     }
 }
 
-// Turns a failed API result into a message for the user. FastAPI puts the
-// reason in `detail`: a string, or a list of validation errors.
 function errorText(result) {
     if (result.status === 0) {
         return "Could not reach the server. Please try again.";
@@ -94,8 +77,6 @@ function errorText(result) {
     }
     return "Something went wrong. Please try again.";
 }
-
-// ---------- Logging in and out ----------
 
 function showView(name) {
     authView.hidden = name !== "auth";
@@ -140,7 +121,6 @@ async function enterChat() {
     showView("chat");
     showChatHeader();
     renderSidebar();
-    // History and the sidebar are loaded once the WebSocket says auth_ok.
     connect();
 }
 
@@ -162,8 +142,6 @@ function logOut(message = "") {
     showAuthError(message);
 }
 
-// ---------- WebSocket ----------
-
 function setStatus(text, state) {
     connectionStatus.textContent = text;
     connectionStatus.className = `status-pill status-pill--${state}`;
@@ -174,8 +152,6 @@ function setSendingEnabled(enabled) {
     sendButton.disabled = !enabled;
 }
 
-// Closes the socket on purpose. Setting `socket` to null first tells the
-// close handler below not to reconnect.
 function closeSocket() {
     const ws = socket;
     socket = null;
@@ -193,12 +169,10 @@ function connect() {
     const ws = new WebSocket(`${scheme}//${location.host}/ws`);
     socket = ws;
 
-    // Step 1: the first frame we send must be our token.
     ws.addEventListener("open", () => {
         ws.send(JSON.stringify({ type: "auth", data: { token } }));
     });
 
-    // Step 2: everything the server sends arrives here.
     ws.addEventListener("message", (event) => {
         if (ws === socket) {
             handleFrame(JSON.parse(event.data));
@@ -207,16 +181,14 @@ function connect() {
 
     ws.addEventListener("close", (event) => {
         if (ws !== socket) {
-            return; // We closed it ourselves (log out, or a new connection).
+            return;
         }
         socket = null;
         setSendingEnabled(false);
-        // 1008: the token was rejected or has expired.
         if (event.code === 1008) {
             logOut(SESSION_EXPIRED);
             return;
         }
-        // Anything else (server restart, network drop): try again shortly.
         setStatus("Disconnected. Reconnecting...", "disconnected");
         reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
     });
@@ -228,7 +200,6 @@ function handleFrame(frame) {
         setSendingEnabled(true);
         clearChatError();
         messageInput.focus();
-        // (Re)load everything, in case we missed messages while disconnected.
         loadHistory();
         loadSidebar();
     } else if (frame.type === "message") {
@@ -250,10 +221,9 @@ function receiveMessage(chatId, message) {
     if (chatId !== GENERAL.id) {
         const conversation = conversations.find((c) => c.id === chatId);
         if (!conversation) {
-            loadSidebar(); // Someone started a new conversation with us.
+            loadSidebar();
             return;
         }
-        // Newest activity first: move this conversation to the top.
         conversations = [conversation, ...conversations.filter((c) => c !== conversation)];
     }
     renderSidebar();
@@ -267,8 +237,6 @@ function sendMessage(content) {
     socket.send(JSON.stringify(frame));
 }
 
-// ---------- Messages ----------
-
 function showChatError(message) {
     chatError.textContent = message;
     chatError.hidden = false;
@@ -279,8 +247,6 @@ function clearChatError() {
 }
 
 function formatTime(value) {
-    // The server sends UTC times without a time zone, sometimes with
-    // microseconds. Keep up to milliseconds and mark them as UTC ("Z").
     return new Date(value.slice(0, 23) + "Z").toLocaleString();
 }
 
@@ -301,7 +267,6 @@ function buildMessageElement(message) {
     time.textContent = formatTime(message.created_at);
     meta.append(sender, " ", time);
 
-    // textContent (never innerHTML) so messages can't inject HTML.
     const bubble = document.createElement("p");
     bubble.className = "message__bubble";
     bubble.textContent = message.content;
@@ -338,7 +303,7 @@ async function loadHistory() {
     const result = await api(path);
 
     if (chat !== activeChat) {
-        return; // The user switched chats while this was loading.
+        return;
     }
     if (result.status === 401) {
         logOut(SESSION_EXPIRED);
@@ -348,14 +313,10 @@ async function loadHistory() {
         historyError.hidden = false;
         return;
     }
-    // Live messages may have arrived while we were loading; they are newer,
-    // so put the history in front of them and skip any duplicates.
     const older = result.data.filter((message) => !isShown(message));
     messageList.prepend(...older.map(buildMessageElement));
     messageList.scrollTop = messageList.scrollHeight;
 }
-
-// ---------- Chats and sidebar ----------
 
 function showChatHeader() {
     const isGeneral = activeChat.id === GENERAL.id;
@@ -410,7 +371,7 @@ async function loadSidebar() {
         api("/conversations"),
     ]);
     if (token !== requestToken) {
-        return; // Logged out while loading.
+        return;
     }
     if (usersResult.status === 401 || conversationsResult.status === 401) {
         logOut(SESSION_EXPIRED);
@@ -422,8 +383,6 @@ async function loadSidebar() {
     }
     users = usersResult.data;
     conversations = conversationsResult.data;
-    // The server only lists conversations that have messages. Keep the open
-    // one visible even if nothing has been sent in it yet.
     const open = activeChat.conversation;
     if (open && !conversations.some((c) => c.id === open.id)) {
         conversations.unshift(open);
@@ -452,7 +411,7 @@ function buildSidebarItem(icon, name, chatId, onClick) {
         const dot = document.createElement("span");
         dot.className = "sidebar__unread";
         const label = document.createElement("span");
-        label.className = "visually-hidden"; // read by screen readers only
+        label.className = "visually-hidden";
         label.textContent = "unread messages";
         dot.append(label);
         button.append(dot);
@@ -476,7 +435,6 @@ function renderSidebar() {
     );
     conversationEmpty.hidden = conversations.length > 0;
 
-    // "Start a chat" lists everyone we don't have a conversation with yet.
     const talkingTo = new Set(conversations.map((c) => c.other_user_id));
     const others = users.filter((u) => u.id !== currentUser.id && !talkingTo.has(u.id));
     userList.replaceChildren(
@@ -490,8 +448,6 @@ function renderSidebar() {
 
     sidebarToggle.classList.toggle("sidebar-toggle--unread", unread.size > 0);
 }
-
-// ---------- Event listeners ----------
 
 loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -539,10 +495,8 @@ document.addEventListener("keydown", (event) => {
     }
 });
 
-// ---------- Start ----------
-
 if (token) {
-    enterChat(); // Still logged in from earlier in this tab.
+    enterChat();
 } else {
     showForm("login");
     showView("auth");

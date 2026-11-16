@@ -1,4 +1,3 @@
-
 import re
 from datetime import datetime
 
@@ -14,7 +13,7 @@ class UserCreate(BaseModel):
     @classmethod
     def normalize_username(cls, value):
         if not isinstance(value, str):
-            return value  # let Pydantic report the wrong type
+            return value
         value = value.strip()
         if not USERNAME_PATTERN.fullmatch(value):
             raise ValueError(

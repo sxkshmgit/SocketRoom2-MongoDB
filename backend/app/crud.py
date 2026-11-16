@@ -1,187 +1,183 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import func, or_, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
-from backend.app.models import (
-    ChatRoom,
-    Conversation,
-    Message,
-    PrivateMessage,
-    User,
-)
+from backend.app.database import next_id
+from backend.app.models import Conversation, Message, PrivateMessage, User
 
-DEFAULT_ROOM_NAME = "General"
+NO_MONGO_ID = {"_id": False}
 
 
-def get_user_by_id(db: Session, user_id: int) -> User | None:
-    return db.scalars(select(User).where(User.id == user_id)).first()
+def _now() -> datetime:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return now.replace(microsecond=now.microsecond // 1000 * 1000)
 
-def get_users(db: Session) -> list[User]:
-    return list(db.scalars(select(User).order_by(User.id)).all())
 
-def get_user_by_username(db: Session, username: str) -> User | None:
-    # Case-insensitive, so "Alice" finds "alice".
-    return db.scalars(
-        select(User).where(func.lower(User.username) == username.lower())
-    ).first()
+def get_user_by_id(db: Database, user_id: int) -> User | None:
+    document = db.users.find_one({"id": user_id}, NO_MONGO_ID)
+    return User(**document) if document else None
 
-def create_user(db: Session, username: str, password_hash: str) -> User:
-    user = User(username=username, password_hash=password_hash)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+
+def get_users(db: Database) -> list[User]:
+    return [User(**document) for document in db.users.find({}, NO_MONGO_ID).sort("id", 1)]
+
+
+def get_user_by_username(db: Database, username: str) -> User | None:
+    document = db.users.find_one({"username": username.lower()}, NO_MONGO_ID)
+    return User(**document) if document else None
+
+
+def create_user(db: Database, username: str, password_hash: str) -> User | None:
+    user = User(
+        id=next_id(db, "users"),
+        username=username.lower(),
+        password_hash=password_hash,
+        created_at=_now(),
+    )
+    try:
+        db.users.insert_one(vars(user).copy())
+    except DuplicateKeyError:
+        return None
     return user
 
-def ensure_default_room(db: Session) -> ChatRoom:
-    room = db.scalars(
-        select(ChatRoom).where(ChatRoom.name == DEFAULT_ROOM_NAME)
-    ).first()
-    if room is not None:
-        return room
 
-    room = ChatRoom(name=DEFAULT_ROOM_NAME)
-    db.add(room)
-    db.commit()
-    db.refresh(room)
-    return room
-
-def get_default_room(db: Session) -> ChatRoom | None:
-    return db.scalars(
-        select(ChatRoom).where(ChatRoom.name == DEFAULT_ROOM_NAME)
-    ).first()
+def _require_user(db: Database, user_id: int) -> User:
+    user = get_user_by_id(db, user_id)
+    if user is None:
+        raise ValueError(f"User {user_id} does not exist")
+    return user
 
 
-def create_message(
-    db: Session, room_id: int, sender_id: int, content: str
-) -> Message:
-    message = Message(room_id=room_id, sender_id=sender_id, content=content)
-    db.add(message)
-    db.commit()
-    db.refresh(message)
+def create_message(db: Database, sender_id: int, content: str) -> Message:
+    sender = _require_user(db, sender_id)
+    message = Message(
+        id=next_id(db, "messages"),
+        sender_id=sender.id,
+        sender_username=sender.username,
+        content=content,
+        created_at=_now(),
+    )
+    document = vars(message).copy()
+    del document["room_id"]
+    db.messages.insert_one(document)
     return message
 
 
-def get_recent_messages(db: Session, room_id: int, limit: int = 50) -> list[Message]:
-    newest_first = db.scalars(
-        select(Message)
-        .where(Message.room_id == room_id)
-        .order_by(Message.id.desc())
-        .limit(limit)
-    ).all()
-    return list(reversed(newest_first))
+def get_recent_messages(db: Database, limit: int = 50) -> list[Message]:
+    newest_first = db.messages.find({}, NO_MONGO_ID).sort("id", -1).limit(limit)
+    return [Message(**document) for document in reversed(list(newest_first))]
+
 
 def _ordered_pair(user_a_id: int, user_b_id: int) -> tuple[int, int]:
     return (user_a_id, user_b_id) if user_a_id < user_b_id else (user_b_id, user_a_id)
 
 
+def _to_conversation(db: Database, document: dict) -> Conversation:
+    return Conversation(
+        **document,
+        user_low=get_user_by_id(db, document["user_low_id"]),
+        user_high=get_user_by_id(db, document["user_high_id"]),
+    )
+
+
 def get_conversation_between_users(
-    db: Session, user_a_id: int, user_b_id: int
+    db: Database, user_a_id: int, user_b_id: int
 ) -> Conversation | None:
     if user_a_id == user_b_id:
         return None
     low_id, high_id = _ordered_pair(user_a_id, user_b_id)
-    return db.scalars(
-        select(Conversation).where(
-            Conversation.user_low_id == low_id,
-            Conversation.user_high_id == high_id,
-        )
-    ).first()
+    document = db.conversations.find_one(
+        {"user_low_id": low_id, "user_high_id": high_id}, NO_MONGO_ID
+    )
+    return _to_conversation(db, document) if document else None
 
 
 def get_or_create_conversation(
-    db: Session, user_id: int, other_user_id: int
+    db: Database, user_id: int, other_user_id: int
 ) -> Conversation:
-    # Callers should map ValueError to a 400 response.
     if user_id == other_user_id:
         raise ValueError("Cannot create a conversation with yourself")
+    _require_user(db, user_id)
+    _require_user(db, other_user_id)
 
     conversation = get_conversation_between_users(db, user_id, other_user_id)
     if conversation is not None:
         return conversation
 
     low_id, high_id = _ordered_pair(user_id, other_user_id)
-    conversation = Conversation(user_low_id=low_id, user_high_id=high_id)
-    db.add(conversation)
+    document = {
+        "id": next_id(db, "conversations"),
+        "user_low_id": low_id,
+        "user_high_id": high_id,
+        "created_at": _now(),
+    }
     try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        # Either another request created the same pair first (re-query finds it),
-        # or a foreign key failed (e.g. unknown user): then re-raise the error.
-        conversation = get_conversation_between_users(db, user_id, other_user_id)
-        if conversation is None:
-            raise
-        return conversation
-
-    db.refresh(conversation)
-    return conversation
+        db.conversations.insert_one(document.copy())
+    except DuplicateKeyError:
+        return get_conversation_between_users(db, user_id, other_user_id)
+    return _to_conversation(db, document)
 
 
 def get_conversation_for_user(
-    db: Session, conversation_id: int, user_id: int
+    db: Database, conversation_id: int, user_id: int
 ) -> Conversation | None:
-    return db.scalars(
-        select(Conversation).where(
-            Conversation.id == conversation_id,
-            or_(
-                Conversation.user_low_id == user_id,
-                Conversation.user_high_id == user_id,
-            ),
-        )
-    ).first()
+    document = db.conversations.find_one(
+        {
+            "id": conversation_id,
+            "$or": [{"user_low_id": user_id}, {"user_high_id": user_id}],
+        },
+        NO_MONGO_ID,
+    )
+    return _to_conversation(db, document) if document else None
 
 
 def create_private_message(
-    db: Session, conversation_id: int, sender_id: int, content: str
+    db: Database, conversation_id: int, sender_id: int, content: str
 ) -> PrivateMessage:
-    # The caller must already have verified that sender_id is a participant
-    # (see get_conversation_for_user).
+    sender = _require_user(db, sender_id)
     message = PrivateMessage(
-        conversation_id=conversation_id, sender_id=sender_id, content=content
+        id=next_id(db, "private_messages"),
+        conversation_id=conversation_id,
+        sender_id=sender.id,
+        sender_username=sender.username,
+        content=content,
+        created_at=_now(),
     )
-    db.add(message)
-    db.commit()
-    db.refresh(message)
+    db.private_messages.insert_one(vars(message).copy())
     return message
 
 
 def get_recent_private_messages(
-    db: Session, conversation_id: int, limit: int = 50
+    db: Database, conversation_id: int, limit: int = 50
 ) -> list[PrivateMessage]:
-    newest_first = db.scalars(
-        select(PrivateMessage)
-        .where(PrivateMessage.conversation_id == conversation_id)
-        .order_by(PrivateMessage.id.desc())
+    newest_first = (
+        db.private_messages.find({"conversation_id": conversation_id}, NO_MONGO_ID)
+        .sort("id", -1)
         .limit(limit)
-    ).all()
-    return list(reversed(newest_first))
+    )
+    return [PrivateMessage(**document) for document in reversed(list(newest_first))]
 
 
 def list_conversations_for_user(
-    db: Session, user_id: int
+    db: Database, user_id: int
 ) -> list[tuple[Conversation, datetime]]:
-    # Only conversations that contain at least one message, newest activity first.
-    my_conversation_ids = select(Conversation.id).where(
-        or_(
-            Conversation.user_low_id == user_id,
-            Conversation.user_high_id == user_id,
+    my_conversations = {
+        document["id"]: document
+        for document in db.conversations.find(
+            {"$or": [{"user_low_id": user_id}, {"user_high_id": user_id}]}, NO_MONGO_ID
         )
-    )
-    last_activity = (
-        select(
-            PrivateMessage.conversation_id.label("conversation_id"),
-            func.max(PrivateMessage.id).label("last_message_id"),
-            func.max(PrivateMessage.created_at).label("last_message_at"),
-        )
-        .where(PrivateMessage.conversation_id.in_(my_conversation_ids))
-        .group_by(PrivateMessage.conversation_id)
-        .subquery()
-    )
-    rows = db.execute(
-        select(Conversation, last_activity.c.last_message_at)
-        .join(last_activity, last_activity.c.conversation_id == Conversation.id)
-        .order_by(last_activity.c.last_message_id.desc())
-    ).all()
-    return [(row[0], row[1]) for row in rows]
+    }
+    last_activity = db.private_messages.aggregate([
+        {"$match": {"conversation_id": {"$in": list(my_conversations)}}},
+        {"$group": {
+            "_id": "$conversation_id",
+            "last_message_id": {"$max": "$id"},
+            "last_message_at": {"$max": "$created_at"},
+        }},
+        {"$sort": {"last_message_id": -1}},
+    ])
+    return [
+        (_to_conversation(db, my_conversations[row["_id"]]), row["last_message_at"])
+        for row in last_activity
+    ]

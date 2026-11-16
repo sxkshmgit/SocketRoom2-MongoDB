@@ -58,8 +58,6 @@ body {
     overflow: hidden;
 }
 
-/* ---------- Buttons ---------- */
-
 .btn {
     display: inline-flex;
     align-items: center;
@@ -145,8 +143,6 @@ body {
     border-radius: 4px;
 }
 
-/* ---------- Inputs ---------- */
-
 .field {
     display: flex;
     flex-direction: column;
@@ -201,8 +197,6 @@ body {
     cursor: not-allowed;
 }
 
-/* ---------- Alerts ---------- */
-
 .alert {
     margin: 0;
     padding: 0.65rem 0.85rem;
@@ -216,8 +210,6 @@ body {
     background: var(--danger-bg);
     border: 1px solid var(--danger-border);
 }
-
-/* ---------- Authentication ---------- */
 
 .auth-view {
     display: flex;
@@ -311,8 +303,6 @@ body {
     color: var(--text-muted);
 }
 
-/* ---------- Chat layout ---------- */
-
 .chat {
     display: flex;
     flex-direction: column;
@@ -381,8 +371,6 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-
-/* ---------- Sidebar ---------- */
 
 .sidebar {
     display: flex;
@@ -551,8 +539,6 @@ body {
     font-size: 0.85rem;
 }
 
-/* ---------- Connection status ---------- */
-
 .status-pill {
     display: inline-flex;
     align-items: center;
@@ -603,8 +589,6 @@ body {
         opacity: 0.35;
     }
 }
-
-/* ---------- Messages ---------- */
 
 .message-list {
     display: flex;
@@ -704,7 +688,6 @@ body {
     padding: 0.4rem 0.8rem;
     font-size: 0.8rem;
 }
-/* ---------- Composer ---------- */
 
 .composer {
     display: flex;
@@ -730,8 +713,6 @@ body {
     padding-inline: 1.4rem;
 }
 
-/* ---------- Responsive ---------- */
-
 @media (min-width: 768px) {
     .app {
         padding: 1.5rem;
@@ -745,7 +726,6 @@ body {
     }
 }
 
-/* On narrow screens the sidebar becomes an overlay opened from the header. */
 @media (max-width: 719px) {
     .sidebar-toggle {
         display: inline-flex;

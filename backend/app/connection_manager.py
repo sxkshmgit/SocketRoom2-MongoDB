@@ -3,8 +3,6 @@ from fastapi import WebSocket
 
 class ConnectionManager:
     def __init__(self) -> None:
-        # Each open socket mapped to its user's ID. One user can have several
-        # sockets (for example, two browser tabs).
         self.active_connections: dict[WebSocket, int] = {}
 
     def connect(self, websocket: WebSocket, user_id: int) -> None:

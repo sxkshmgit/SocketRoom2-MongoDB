@@ -1,8 +1,10 @@
-# SocketRoom2
+# SocketRoom2-MongoDB
 
-A real-time chat application built with **FastAPI, WebSockets, Microsoft SQL Server Express, SQLAlchemy, and vanilla JavaScript**.
+A real-time chat application built with **FastAPI, WebSockets, MongoDB, and vanilla JavaScript**.
 
 SocketRoom2 is a learning and portfolio project focused on backend fundamentals, authentication, database persistence, and real-time communication between connected clients.
+
+This is the **MongoDB** version of the project. The same app using Microsoft SQL Server lives in [SocketRoom2](https://github.com/sxkshmgit/SocketRoom2).
 
 ## Features
 
@@ -12,12 +14,12 @@ SocketRoom2 is a learning and portfolio project focused on backend fundamentals,
 - A shared chatroom named **General**.
 - **One-to-one private messaging**:
   - Start a private conversation with any registered user.
-  - Exactly one conversation per pair of users, enforced by the database.
+  - Exactly one conversation per pair of users, enforced by a unique index.
   - Real-time delivery to both participants, including every open tab.
   - A conversation list ordered by most recent activity, with unread markers.
   - Conversations and history persist across logout and login.
 - Real-time message broadcasting over a single WebSocket connection.
-- Persistent message storage in SQL Server.
+- Persistent storage of users, conversations, and messages in MongoDB.
 - Retrieval of recent message history (up to 100 messages per request).
 - Automatic WebSocket reconnection after a dropped connection.
 - A Retry option when loading chat history fails.
@@ -31,27 +33,26 @@ SocketRoom2 is a learning and portfolio project focused on backend fundamentals,
 |---|---|
 | Backend | Python, FastAPI |
 | Real-time communication | WebSockets |
-| Database | Microsoft SQL Server Express |
-| Database driver | pyodbc with ODBC Driver 17 for SQL Server |
-| ORM | SQLAlchemy 2.x |
+| Database | MongoDB |
+| Database driver | PyMongo |
 | Data validation | Pydantic v2 |
 | Authentication | JWT, PyJWT |
 | Password hashing | Argon2 through pwdlib |
 | Frontend | HTML, CSS, vanilla JavaScript |
-| Tests | Pytest (against in-memory SQLite) |
+| Tests | Pytest (against mongomock, an in-memory fake MongoDB) |
 
 ## Project structure
 
 ~~~text
-SocketRoom2/
+SocketRoom2-MongoDB/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py                 # Routes, WebSocket endpoint, startup
 │   │   ├── connection_manager.py   # Tracks open sockets per user
 │   │   ├── crud.py                 # Database queries
-│   │   ├── database.py             # SQL Server engine and sessions
+│   │   ├── database.py             # MongoDB connection, indexes, ID counter
 │   │   ├── dependencies.py         # Current-user dependency
-│   │   ├── models.py               # SQLAlchemy models
+│   │   ├── models.py               # Dataclasses for users, conversations, messages
 │   │   ├── schemas.py              # Pydantic request/response models
 │   │   └── security.py             # Password hashing and JWTs
 │   ├── requirements.txt
@@ -64,7 +65,7 @@ SocketRoom2/
 │   ├── conftest.py
 │   ├── test_authentication.py
 │   ├── test_protected_routes.py
-│   ├── test_room_initialization.py
+│   ├── test_database_setup.py
 │   ├── test_websocket_general.py
 │   ├── test_private_crud.py
 │   ├── test_private_routes.py
@@ -76,8 +77,8 @@ SocketRoom2/
 
 ### Prerequisites
 
-- Windows with **SQL Server Express** installed as the named instance **SQLEXPRESS**.
-- **ODBC Driver 17 for SQL Server**.
+- **MongoDB Community Server** running locally on the default port (27017).
+- Optionally, **MongoDB Compass** to browse the data.
 - Python 3.10 or newer.
 - Git.
 - A modern web browser.
@@ -85,19 +86,22 @@ SocketRoom2/
 ### 1. Clone the repository
 
 ~~~bash
-git clone https://github.com/sxkshmgit/SocketRoom2.git
-cd SocketRoom2
+git clone https://github.com/sxkshmgit/SocketRoom2-MongoDB.git
+cd SocketRoom2-MongoDB
 ~~~
 
-### 2. Create the database
+### 2. Start MongoDB
 
-The application creates its tables automatically, but the database itself must already exist. Create an empty database named **SocketRoomDB** on the `.\SQLEXPRESS` instance, for example in SQL Server Management Studio or with:
+Install MongoDB Community Server and make sure it is running (on Windows it installs as the **MongoDB** service). Nothing needs to be created by hand: MongoDB creates the **socketroom** database and its collections the first time the app saves something.
 
-~~~powershell
-sqlcmd -S .\SQLEXPRESS -E -Q "CREATE DATABASE SocketRoomDB"
-~~~
+By default the app connects to **mongodb://localhost:27017** and uses the database **socketroom**. To use something else, set these environment variables before starting the app:
 
-The connection uses **Windows Authentication** (trusted connection), so no database username or password is configured. The server, database, and driver names are set in **backend/app/database.py**; change them there if your setup differs.
+| Variable | Default |
+|---|---|
+| MONGO_URL | mongodb://localhost:27017 |
+| MONGO_DB | socketroom |
+
+To start again with no data, drop the **socketroom** database in MongoDB Compass (or run `db.dropDatabase()` in mongosh). The app recreates its indexes on the next start.
 
 ### 3. Create and activate a virtual environment
 
@@ -165,7 +169,7 @@ Open the application:
 http://127.0.0.1:8000
 ~~~
 
-On startup, the application creates any missing tables and initializes the **General** room if it does not already exist.
+On startup, the application checks that MongoDB is reachable and creates its indexes. If MongoDB is not running, startup stops after about 3 seconds with a connection error.
 
 To try private messaging, log in as two different users in two browser tabs or windows. Each tab keeps its own session.
 
@@ -205,7 +209,7 @@ The frontend reconnects 2 seconds after an unexpected WebSocket closure and then
 
 ### Private conversations
 
-- A conversation stores its two users as **user_low_id** and **user_high_id** (the smaller ID first). A unique constraint and a check constraint guarantee one conversation per pair, regardless of who starts it.
+- A conversation stores its two users as **user_low_id** and **user_high_id** (the smaller ID first), and a unique index on that pair guarantees one conversation per pair, regardless of who starts it.
 - Starting a conversation is a get-or-create operation, so it is safe to call repeatedly or from both users at once.
 - Only participants can read a conversation's history or send messages to it. Non-participants receive the same "not found" response as for a conversation that does not exist, so conversation IDs are not revealed.
 - The conversation list only includes conversations with at least one message.
@@ -369,9 +373,26 @@ Invalid frames do not close the connection. The server replies with an error fra
 
 Possible messages: **Invalid message format**, **Unsupported message type**, **Message content is invalid** (empty after trimming, or longer than 2000 characters), **Conversation not found**, and **Message could not be saved**.
 
+## How data is stored
+
+MongoDB stores documents in collections:
+
+| Collection | Example document |
+|---|---|
+| users | `{ id: 1, username: "alice", password_hash: "...", created_at }` |
+| messages (General) | `{ id: 1, sender_id: 1, sender_username: "alice", content: "hi", created_at }` |
+| conversations | `{ id: 1, user_low_id: 1, user_high_id: 2, created_at }` |
+| private_messages | `{ id: 1, conversation_id: 1, sender_id: 1, sender_username: "alice", content: "hi", created_at }` |
+| counters | `{ _id: "users", value: 1 }` |
+
+- **Numeric IDs:** MongoDB's own `_id` values are long strings, so the app hands out its own numbers (1, 2, 3, ...) from the **counters** collection. That keeps the API and frontend simple.
+- **Unique indexes** replace database constraints: one account per username, one conversation per pair of users, and one document per ID.
+- **No joins:** each message stores its sender's username, so loading history is a single query. Usernames cannot change, so the copy never goes stale.
+- **No foreign keys:** MongoDB does not check that IDs point to real documents, so the code checks this itself (for example, only conversation members can post, and messages from unknown users are rejected).
+
 ## Running tests
 
-The test suite uses Pytest. Tests run against an in-memory SQLite database with foreign keys enabled, so SQL Server does not need to be running. From the project root, with development dependencies installed, run:
+The test suite uses Pytest. Tests run against **mongomock**, an in-memory fake MongoDB, so MongoDB does not need to be running and your real data is never touched. From the project root, with development dependencies installed, run:
 
 ~~~bash
 python -m pytest -v
@@ -381,7 +402,7 @@ The tests cover:
 
 - User registration and login, and duplicate usernames.
 - Protected HTTP routes.
-- Initialization of the default chatroom.
+- Database setup: unique indexes and the ID counter.
 - General chat over WebSockets: authentication, broadcasting, persistence, invalid frames, and disconnects.
 - Private chat data layer: one conversation per pair, participant checks, history ordering and limits.
 - Private chat HTTP endpoints, including authorization and error codes.
@@ -392,8 +413,7 @@ The tests cover:
 SocketRoom2 is intentionally a small application. Its current design has these limitations:
 
 - **Single process:** active WebSocket connections are held in memory by one connection manager. Run the application with a single Uvicorn worker; multiple workers would maintain separate connection lists and would not deliver messages across processes.
-- **Local database configuration:** the SQL Server connection settings are constants in **backend/app/database.py** rather than environment variables.
-- **No migrations:** tables are created with SQLAlchemy's **create_all**, which creates missing tables but never alters existing ones. Schema changes to existing tables must be applied manually.
+- **No schema migrations:** documents have no enforced schema. If a document's fields change, existing documents must be updated manually.
 - **Recent history only:** the API returns up to 100 recent messages per request. Older-message pagination is not implemented.
 - **No explicit send acknowledgement:** the WebSocket protocol does not provide a client message ID and server acknowledgement for each send. A connection failure at the wrong moment can therefore leave the sender unsure whether a message was saved.
 - **Short sessions, no refresh:** tokens expire after 30 minutes, and the server then closes the WebSocket with code 1008, so users must log in again. There is no token refresh.
@@ -410,8 +430,8 @@ This project provides hands-on practice with:
 - Building REST endpoints with FastAPI.
 - Validating request and response data with Pydantic.
 - Hashing passwords and issuing JWTs.
-- Modeling relational data, including constraints that enforce business rules, with SQLAlchemy.
-- Persisting data in Microsoft SQL Server.
+- Modeling data as MongoDB documents, with unique indexes that enforce business rules.
+- Persisting data in MongoDB with PyMongo.
 - Authenticating and managing WebSocket connections.
 - Broadcasting messages and delivering targeted messages to specific users.
 - Enforcing authorization so users can only access their own conversations.

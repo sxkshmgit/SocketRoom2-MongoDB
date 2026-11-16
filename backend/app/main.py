@@ -15,22 +15,17 @@ from fastapi import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
-from sqlalchemy.orm import Session
+from pymongo.database import Database
+from pymongo.errors import PyMongoError
 
-from sqlalchemy.exc import IntegrityError , SQLAlchemyError
-from backend.app import crud, models, schemas , security
-from backend.app.database import Base, SessionLocal, engine, get_db
+from backend.app import crud, models, schemas, security
+from backend.app.database import get_db, init_db
 from backend.app.connection_manager import manager
 from backend.app.dependencies import get_current_user, get_user_from_token
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
-    try:
-        crud.ensure_default_room(db)
-    finally:
-        db.close()
+    init_db()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -41,7 +36,7 @@ def health_check():
 
 @app.get("/users", response_model=list[schemas.UserResponse])
 def list_users(
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     return crud.get_users(db)
@@ -51,7 +46,7 @@ def list_users(
     response_model=schemas.UserResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def register_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
+def register_user(user_in: schemas.UserCreate, db: Database = Depends(get_db)):
     if crud.get_user_by_username(db, user_in.username) is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -60,18 +55,17 @@ def register_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
 
     password_hash = security.hash_password(user_in.password)
 
-    try:
-        return crud.create_user(db, user_in.username, password_hash)
-    except IntegrityError:
-        db.rollback()
+    user = crud.create_user(db, user_in.username, password_hash)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Username already taken",
         )
+    return user
 
 
 @app.post("/auth/login", response_model=schemas.TokenResponse)
-def login(login_in: schemas.LoginRequest, db: Session = Depends(get_db)):
+def login(login_in: schemas.LoginRequest, db: Database = Depends(get_db)):
     user = crud.get_user_by_username(db, login_in.username)
 
     if user is None or not security.verify_password(
@@ -93,17 +87,10 @@ def read_current_user(current_user: models.User = Depends(get_current_user)):
 @app.get("/messages", response_model=list[schemas.MessageResponse])
 def list_messages(
     limit: int = Query(default=50, ge=1, le=100),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    room = crud.get_default_room(db)
-    if room is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Default chat room is not available",
-        )
-
-    return crud.get_recent_messages(db, room.id, limit)
+    return crud.get_recent_messages(db, limit)
 
 
 def conversation_response(
@@ -123,7 +110,7 @@ def conversation_response(
 @app.post("/conversations", response_model=schemas.ConversationResponse)
 def start_conversation(
     conversation_in: schemas.ConversationCreate,
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     if conversation_in.user_id == current_user.id:
@@ -149,7 +136,7 @@ def start_conversation(
 
 @app.get("/conversations", response_model=list[schemas.ConversationResponse])
 def list_conversations(
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     return [
@@ -167,10 +154,9 @@ def list_conversations(
 def list_private_messages(
     conversation_id: int,
     limit: int = Query(default=50, ge=1, le=100),
-    db: Session = Depends(get_db),
+    db: Database = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    # 404 rather than 403 for non-participants, so conversation IDs don't leak.
     conversation = crud.get_conversation_for_user(db, conversation_id, current_user.id)
     if conversation is None:
         raise HTTPException(
@@ -184,58 +170,34 @@ AUTH_TIMEOUT_SECONDS = 10
 
 
 def authenticate_token(token: str) -> tuple[int, str, float] | None:
-    """Returns (user ID, username, token expiry as a Unix timestamp)."""
     try:
         expires_at = float(security.decode_access_token(token)["exp"])
     except jwt.InvalidTokenError:
         return None
 
-    db = SessionLocal()
-    try:
-        user = get_user_from_token(db, token)
-        if user is None:
-            return None
-        return user.id, user.username, expires_at
-    finally:
-        db.close()
+    user = get_user_from_token(get_db(), token)
+    if user is None:
+        return None
+    return user.id, user.username, expires_at
 
 
-# The save functions below raise SQLAlchemyError if the database fails;
-# handle_frame turns that into an error frame for the sender.
-
-def save_chat_message(user_id: int, content: str) -> dict | None:
-    """Save a General message. Returns its JSON payload, or None if General is missing."""
-    db = SessionLocal()
-    try:
-        room = crud.get_default_room(db)
-        if room is None:
-            return None
-        message = crud.create_message(db, room.id, user_id, content)
-        return schemas.MessageResponse.model_validate(message).model_dump(mode="json")
-    finally:
-        db.close()
+def save_chat_message(user_id: int, content: str) -> dict:
+    message = crud.create_message(get_db(), user_id, content)
+    return schemas.MessageResponse.model_validate(message).model_dump(mode="json")
 
 
 def save_private_message(
     sender_id: int, conversation_id: int, content: str
 ) -> tuple[dict, set[int]] | None:
-    """Save a private message.
-
-    Returns (JSON payload, IDs of both participants), or None if the sender
-    is not part of the conversation.
-    """
-    db = SessionLocal()
-    try:
-        conversation = crud.get_conversation_for_user(db, conversation_id, sender_id)
-        if conversation is None:
-            return None
-        message = crud.create_private_message(db, conversation.id, sender_id, content)
-        payload = schemas.PrivateMessageResponse.model_validate(message).model_dump(
-            mode="json"
-        )
-        return payload, {conversation.user_low_id, conversation.user_high_id}
-    finally:
-        db.close()
+    db = get_db()
+    conversation = crud.get_conversation_for_user(db, conversation_id, sender_id)
+    if conversation is None:
+        return None
+    message = crud.create_private_message(db, conversation.id, sender_id, content)
+    payload = schemas.PrivateMessageResponse.model_validate(message).model_dump(
+        mode="json"
+    )
+    return payload, {conversation.user_low_id, conversation.user_high_id}
 
 
 async def send_error(websocket: WebSocket, text: str) -> None:
@@ -243,11 +205,6 @@ async def send_error(websocket: WebSocket, text: str) -> None:
 
 
 async def handle_frame(websocket: WebSocket, user_id: int, frame) -> None:
-    """Handle one frame from an authenticated client.
-
-    {"type": "message", "content": ...}                          -> everyone
-    {"type": "private_message", "conversation_id": N, "content": ...} -> the two participants
-    """
     frame_type = frame.get("type") if isinstance(frame, dict) else None
     if frame_type not in ("message", "private_message"):
         await send_error(websocket, "Unsupported message type")
@@ -262,28 +219,21 @@ async def handle_frame(websocket: WebSocket, user_id: int, frame) -> None:
     try:
         if frame_type == "message":
             payload = save_chat_message(user_id, content)
-            if payload is None:
-                await send_error(websocket, "Message could not be saved")
-                return
             await manager.broadcast({"type": "message", "data": payload})
             return
 
         conversation_id = frame.get("conversation_id")
-        # type(...) is int also rejects True/False, which isinstance would accept.
         result = None
         if type(conversation_id) is int:
             result = save_private_message(user_id, conversation_id, content)
         if result is None:
-            # Same reply for unknown IDs and other people's conversations,
-            # so conversation IDs aren't revealed.
             await send_error(websocket, "Conversation not found")
             return
         payload, participant_ids = result
-        # Both participants, on every open tab (including the sender's own).
         await manager.send_to_users(
             participant_ids, {"type": "private_message", "data": payload}
         )
-    except SQLAlchemyError:
+    except PyMongoError:
         await send_error(websocket, "Message could not be saved")
 
 
@@ -307,8 +257,7 @@ async def websocket_chat(websocket: WebSocket):
 
         try:
             identity = authenticate_token(token) if isinstance(token, str) else None
-        except SQLAlchemyError:
-            # Temporary server problem, not a bad token: ask the client to retry later.
+        except PyMongoError:
             await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
             return
 
@@ -323,9 +272,6 @@ async def websocket_chat(websocket: WebSocket):
         manager.connect(websocket, user_id)
 
         while True:
-            # The connection is only valid while its token is: wait for the next
-            # frame no longer than the token's remaining lifetime, then close
-            # with 1008 so the client asks the user to log in again.
             remaining = expires_at - time.time()
             if remaining <= 0:
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
